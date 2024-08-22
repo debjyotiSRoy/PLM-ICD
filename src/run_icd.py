@@ -18,6 +18,11 @@ import logging
 import math
 import os
 import random
+from datetime import datetime
+from pathlib import Path
+import pandas as pd
+from collections import Counter
+import matplotlib.pyplot as plt
 
 import datasets
 from datasets import load_dataset, load_metric
@@ -40,7 +45,7 @@ from transformers import (
 from modeling_bert import BertForMultilabelClassification
 from modeling_roberta import RobertaForMultilabelClassification
 from modeling_longformer import LongformerForMultilabelClassification
-from evaluation import all_metrics
+from evaluation import all_metrics, macro_f1_score_per_label
 
 
 logger = logging.getLogger(__name__)
@@ -66,6 +71,9 @@ def parse_args():
     )
     parser.add_argument(
         "--validation_file", type=str, default=None, help="A csv or a json file containing the validation data."
+    ),
+    parser.add_argument(
+        "--dev_file", type=str, default=None, help="A csv or a json file containing the development set data."
     )
     parser.add_argument(
         "--code_file", type=str, default=None, help="A txt file containing all codes."
@@ -169,6 +177,7 @@ def parse_args():
     )
     parser.add_argument("--output_dir", type=str, default=None, help="Where to store the final model.")
     parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
+    parser.add_argument("--logfile", type=str, default=None, help="The log file in the `output_dir`")
     args = parser.parse_args()
 
     # Sanity checks
@@ -187,7 +196,21 @@ def parse_args():
 
     return args
 
-
+def compute_lbs_frqs(trainfile, devfile, label_list, label_delim=';'):
+    df_train = pd.read_csv(trainfile)
+    df_dev = pd.read_csv(devfile)
+    df = pd.concat((df_train, df_dev))
+    # Compute label frequencies
+    lbl_freqs = Counter()
+    for _,row in df.iterrows():
+        if pd.notna(row.LABELS):
+            lbl_freqs.update(row.LABELS.split(label_delim if label_delim is not None else ',' ))
+    # try:
+    if set(lbl_freqs.keys()) != set(label_list):
+        print(f"There are some labels in the test set that are not in training set")
+    # except AssertionError as e:
+    return lbl_freqs
+    
 def main():
     args = parse_args()
 
@@ -205,6 +228,19 @@ def main():
     # Setup logging, we only want one process per machine to log things on the screen.
     # accelerator.is_local_main_process is only True for one process per machine.
     logger.setLevel(logging.INFO if accelerator.is_local_main_process else logging.ERROR)
+
+    if args.logfile:
+        # Create a file handler and set level to DEBUG
+        formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(name)s -   %(message)s")
+        current_datetime = datetime.now()
+        logfilename = f'{args.logfile}_{current_datetime.strftime("%Y-%m-%d_%H-%M-%S")}.txt'
+        logfilename = Path(f'{args.output_dir}/{logfilename}')
+
+        fh = logging.FileHandler(logfilename)
+        fh.setLevel(logging.INFO)
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
+
     if accelerator.is_local_main_process:
         datasets.utils.logging.set_verbosity_warning()
         transformers.utils.logging.set_verbosity_info()
@@ -254,6 +290,10 @@ def main():
                 labels.add(line.strip())
     label_list = sorted(list(labels))
     num_labels = len(label_list)
+    # compute the label frequencies from the training dataset
+
+    if args.num_train_epochs == 0: # We are doing validation
+        lbs_frqs = compute_lbs_frqs(args.train_file, args.dev_file, label_list)
 
     # Load pretrained model and tokenizer
     #
@@ -284,6 +324,7 @@ def main():
     sentence1_key, sentence2_key = "TEXT", None
 
     label_to_id = {v: i for i, v in enumerate(label_list)}
+    # import pdb; pdb.set_trace()
 
     padding = False
 
@@ -471,6 +512,7 @@ def main():
         all_preds = np.stack(all_preds)
         all_labels = np.stack(all_labels)
         metrics = all_metrics(yhat=all_preds, y=all_labels, yhat_raw=all_preds_raw)
+        plot_f1_macro_per_label(yhat=all_preds, y=all_labels, label_to_id=label_to_id, lbs_frqs=lbs_frqs, plot_file=Path(args.output_dir)/'macro_f1_plot.png')
         logger.info(f"evaluation finished")
         logger.info(f"metrics: {metrics}")
         for t in [0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5]:
@@ -482,6 +524,38 @@ def main():
         accelerator.wait_for_everyone()
         unwrapped_model = accelerator.unwrap_model(model)
         unwrapped_model.save_pretrained(args.output_dir, save_function=accelerator.save)
+
+def plot_f1_macro_per_label(yhat, y, label_to_id=None, lbs_frqs=None, plot_file=None):
+    # import pdb; pdb.set_trace()
+    # Compute macro F1 score for each label class
+    macro_f1_lbs = macro_f1_score_per_label(yhat, y)
+    label_to_macro = {lbl: macro_f1_lbs[id] for lbl,id in label_to_id.items()}
+    # Sort labels based on frequencies
+    sorted_labels = sorted(lbs_frqs.keys(), key=lambda x: lbs_frqs[x])
+    # Extract macro F1 scores corresponding to sorted labels
+    macro_f1_scores = [label_to_macro[label] for label in sorted_labels]
+    # from IPython import embed; embed()
+    # macro_f1 = f1.mean().item()
+
+    # Create the plot
+    plt.figure(figsize=(10, 6))
+    # plt.bar(sorted_labels, macro_f1_scores, color='skyblue')
+    plt.plot(range(len(sorted_labels)), macro_f1_scores, color='skyblue')
+    plt.xlabel('Label Ids (Sorted by Frequencies)')
+    plt.ylabel('Macro F1 Score')
+    plt.ylim([-0.2, max(macro_f1_scores) + 1])
+    plt.title(f'Macro F1 Scores for Labels Sorted by Frequencies: {macro_f1_lbs.mean().item()}')
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    # import pdb; pdb.set_trace()
+
+    # Save the plot
+    plt.savefig(plot_file)
+    # plt.show()
+
+    with open(plot_file.name.replace('png', 'txt'), 'w') as file:
+        for lbl in sorted_labels:
+            file.write(f"{str(lbl)}\t{lbs_frqs[lbl]}\t{label_to_macro[lbl]}\n")
 
 
 if __name__ == "__main__":

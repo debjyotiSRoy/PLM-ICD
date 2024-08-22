@@ -10,6 +10,7 @@ import os
 import sys
 
 from sklearn.metrics import roc_curve, auc
+import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 import datasets
@@ -51,7 +52,7 @@ def all_metrics(yhat, y, k=8, yhat_raw=None, calc_auc=True):
             metrics['rec_at_%d' % k_i] = rec_at_k
             prec_at_k = precision_at_k(yhat_raw, y, k_i)
             metrics['prec_at_%d' % k_i] = prec_at_k
-            metrics['f1_at_%d' % k_i] = 2*(prec_at_k*rec_at_k)/(prec_at_k+rec_at_k)
+            metrics['f1_at_%d' % k_i] = 2*(prec_at_k*rec_at_k)/(prec_at_k+rec_at_k+1e-10)
 
         roc_auc = auc_metrics(yhat_raw, y, ymic)
         metrics.update(roc_auc)
@@ -88,6 +89,35 @@ def macro_f1(yhat, y):
     else:
         f1 = 2*(prec*rec)/(prec+rec)
     return f1
+
+def macro_f1_score_per_label(yhat, y, epsilon=1e-7):
+    """
+    Compute the macro F1 score given predicted and true labels.
+    
+    Args:
+    - yhat (torch.Tensor): Predicted labels (binary tensor).
+    - y (torch.Tensor): True labels (binary tensor).
+    - epsilon (float): Smoothing term to avoid division by zero.
+    
+    Returns:
+    - macro_f1 (float): Macro F1 score.
+    """
+    # Compute true positives, false positives, and false negatives
+    tp = (yhat * y).sum(axis=0)
+    fp = ((1 - y) * yhat).sum(axis=0)
+    fn = (y * (1 - yhat)).sum(axis=0)
+
+    # Compute precision and recall
+    precision = tp / (tp + fp + epsilon)
+    recall = tp / (tp + fn + epsilon)
+
+    # Compute F1 score for each class
+    f1 = 2 * precision * recall / (precision + recall + epsilon)
+
+    return f1
+
+
+
 
 ###################
 # INSTANCE-AVERAGED
@@ -152,13 +182,13 @@ def precision_at_k(yhat_raw, y, k):
 ##########################################################################
 
 def micro_accuracy(yhatmic, ymic):
-    return intersect_size(yhatmic, ymic, 0) / union_size(yhatmic, ymic, 0)
+    return intersect_size(yhatmic, ymic, 0) / (1e-10 + union_size(yhatmic, ymic, 0) )
 
 def micro_precision(yhatmic, ymic):
-    return intersect_size(yhatmic, ymic, 0) / yhatmic.sum(axis=0)
+    return intersect_size(yhatmic, ymic, 0) / (1e-10 + yhatmic.sum(axis=0))
 
 def micro_recall(yhatmic, ymic):
-    return intersect_size(yhatmic, ymic, 0) / ymic.sum(axis=0)
+    return intersect_size(yhatmic, ymic, 0) / (1e-10 + ymic.sum(axis=0) )
 
 def micro_f1(yhatmic, ymic):
     prec = micro_precision(yhatmic, ymic)

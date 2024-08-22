@@ -8,3 +8,5 @@ scipy
 tokenizers
 tqdm
 transformers
+ipython
+matplotlib
